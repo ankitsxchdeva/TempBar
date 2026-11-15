@@ -17,18 +17,10 @@ import Testing
         #expect(try parse(#"{"type":"auth_invalid","message":"Invalid access"}"#) == .authInvalid("Invalid access"))
     }
 
-    @Test func getStatesResult() throws {
-        let message = try parse(#"""
-        {"id":2,"type":"result","success":true,"result":[
-          {"entity_id":"sensor.t","state":"21.5","attributes":{"unit_of_measurement":"°C","device_class":"temperature"}},
-          {"entity_id":"climate.c","state":"heat","attributes":{"temperature":70,"hvac_action":"heating"}}
-        ]}
-        """#)
-        guard case .states(let states) = message else { Issue.record("expected states, got \(message)"); return }
-        #expect(states.count == 2)
-        #expect(states[0].numericValue == 21.5)
-        #expect(states[0].unit == "°C")
-        #expect(states[1].attributes["temperature"]?.double == 70)
+    private func update(_ json: String) throws -> HAEntityUpdate {
+        let message = try parse(json)
+        guard case .entities(let update) = message else { throw HAError.requestFailed("expected entities, got \(message)") }
+        return update
     }
 
     @Test func subscribeResult() throws {
@@ -36,17 +28,51 @@ import Testing
         #expect(try parse(#"{"id":1,"type":"result","success":false,"error":{"code":"x","message":"nope"}}"#) == .result(success: false, error: "nope"))
     }
 
-    @Test func stateChangedEvent() throws {
-        let message = try parse(#"""
-        {"id":1,"type":"event","event":{"event_type":"state_changed","data":{"entity_id":"sensor.t",
-          "old_state":{"entity_id":"sensor.t","state":"70","attributes":{}},
-          "new_state":{"entity_id":"sensor.t","state":"71","attributes":{}}}}}
-        """#)
-        #expect(message == .stateChanged(HAState(entityID: "sensor.t", state: "71")))
+    @Test func initialStatesArrive() throws {
+        var cache: [String: HAState] = [:]
+        let touched = try update(#"""
+        {"id":1,"type":"event","event":{"a":{
+          "sensor.t":{"s":"21.5","a":{"unit_of_measurement":"°C"},"c":"01H","lc":1731700000.1},
+          "climate.c":{"s":"heat","a":{"temperature":70,"hvac_action":"heating"},"c":"01H","lc":1731700000.1}}}}
+        """#).apply(to: &cache)
+        #expect(touched.count == 2)
+        #expect(cache["sensor.t"]?.numericValue == 21.5)
+        #expect(cache["sensor.t"]?.unit == "°C")
+        #expect(cache["climate.c"]?.attributes["temperature"]?.double == 70)
     }
 
-    @Test func removedEntityIsIgnored() throws {
-        #expect(try parse(#"{"id":1,"type":"event","event":{"data":{"entity_id":"sensor.t","new_state":null}}}"#) == .other)
+    @Test func diffsMergeIntoCachedState() throws {
+        var cache = ["climate.c": HAState(entityID: "climate.c", state: "heat", attributes: [
+            "temperature": .number(70), "hvac_action": .string("heating"), "preset_mode": .string("home"),
+        ])]
+        // Only the action changed and a preset was dropped; state and target must survive.
+        let touched = try update(#"""
+        {"id":1,"type":"event","event":{"c":{"climate.c":{"+":{"a":{"hvac_action":"idle"},"c":"01J","lu":1731700100.2},"-":{"a":["preset_mode"]}}}}}
+        """#).apply(to: &cache)
+        let climate = try #require(cache["climate.c"])
+        #expect(touched == [climate])
+        #expect(climate.state == "heat")
+        #expect(climate.attributes["temperature"]?.double == 70)
+        #expect(climate.attributes["hvac_action"]?.string == "idle")
+        #expect(climate.attributes["preset_mode"] == nil)
+    }
+
+    @Test func stateChangeKeepsAttributes() throws {
+        var cache = ["sensor.t": HAState(entityID: "sensor.t", state: "70", attributes: ["unit_of_measurement": .string("°F")])]
+        _ = try update(#"{"id":1,"type":"event","event":{"c":{"sensor.t":{"+":{"s":"71","lc":1731700200.3}}}}}"#).apply(to: &cache)
+        #expect(cache["sensor.t"] == HAState(entityID: "sensor.t", state: "71", attributes: ["unit_of_measurement": .string("°F")]))
+    }
+
+    @Test func diffForUnknownEntityIsIgnored() throws {
+        var cache: [String: HAState] = [:]
+        #expect(try update(#"{"id":1,"type":"event","event":{"c":{"sensor.x":{"+":{"s":"1"}}}}}"#).apply(to: &cache).isEmpty)
+    }
+
+    @Test func removedEntityBecomesUnavailable() throws {
+        var cache = ["sensor.t": HAState(entityID: "sensor.t", state: "70")]
+        let touched = try update(#"{"id":1,"type":"event","event":{"r":["sensor.t"]}}"#).apply(to: &cache)
+        #expect(cache.isEmpty)
+        #expect(touched == [HAState(entityID: "sensor.t", state: "unavailable")])
     }
 
     @Test func unavailableStateHasNoValue() {
@@ -144,7 +170,7 @@ struct LiveTests {
             client.onStatus = { status in
                 if case .authFailed = status, !resumed { resumed = true; continuation.resume(returning: status) }
             }
-            client.start(baseURL: url, token: "not-a-real-token")
+            client.start(baseURL: url, token: "not-a-real-token", entityIDs: [])
         }
         client.onStatus = { _ in }
         client.stop()

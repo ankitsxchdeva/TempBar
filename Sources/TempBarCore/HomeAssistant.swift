@@ -11,11 +11,6 @@ public struct HAState: Sendable, Equatable {
         self.attributes = attributes
     }
 
-    init?(json: JSONValue) {
-        guard let entityID = json["entity_id"]?.string, let state = json["state"]?.string else { return nil }
-        self.init(entityID: entityID, state: state, attributes: json["attributes"]?.object ?? [:])
-    }
-
     public var isAvailable: Bool { state != "unavailable" && state != "unknown" }
     public var numericValue: Double? { isAvailable ? Double(state) : nil }
     public var unit: String? { attributes["unit_of_measurement"]?.string }
@@ -27,9 +22,8 @@ public enum HAIncoming: Sendable, Equatable {
     case authRequired
     case authOK
     case authInvalid(String)
-    case states([HAState])
     case result(success: Bool, error: String?)
-    case stateChanged(HAState)
+    case entities(HAEntityUpdate)
     case pong
     case other
 
@@ -45,19 +39,63 @@ public enum HAIncoming: Sendable, Equatable {
         case "pong":
             return .pong
         case "result":
-            if let items = json["result"]?.array {
-                return .states(items.compactMap(HAState.init(json:)))
-            }
             return .result(success: json["success"]?.bool ?? false, error: json["error"]?["message"]?.string)
         case "event":
-            // new_state is null when an entity is removed.
-            guard let newState = json["event"]?["data"]?["new_state"], let state = HAState(json: newState) else {
-                return .other
-            }
-            return .stateChanged(state)
+            guard let event = json["event"] else { return .other }
+            return .entities(HAEntityUpdate(json: event))
         default:
             return .other
         }
+    }
+}
+
+/// A `subscribe_entities` event: full states under "a", diffs under "c", removals under "r".
+/// https://developers.home-assistant.io/docs/api/websocket/#subscribe-to-entities
+public struct HAEntityUpdate: Sendable, Equatable {
+    public struct Diff: Sendable, Equatable {
+        public var state: String?
+        public var attributes: [String: JSONValue] = [:]
+        public var removedAttributes: [String] = []
+    }
+
+    public var added: [String: HAState] = [:]
+    public var changed: [String: Diff] = [:]
+    public var removed: [String] = []
+
+    init(json: JSONValue) {
+        for (id, entity) in json["a"]?.object ?? [:] {
+            added[id] = HAState(entityID: id, state: entity["s"]?.string ?? "unknown", attributes: entity["a"]?.object ?? [:])
+        }
+        for (id, entity) in json["c"]?.object ?? [:] {
+            changed[id] = Diff(
+                state: entity["+"]?["s"]?.string,
+                attributes: entity["+"]?["a"]?.object ?? [:],
+                removedAttributes: entity["-"]?["a"]?.array?.compactMap(\.string) ?? []
+            )
+        }
+        removed = json["r"]?.array?.compactMap(\.string) ?? []
+    }
+
+    /// Folds this update into `cache` and returns the entities that changed. Removed ones come back unavailable.
+    public func apply(to cache: inout [String: HAState]) -> [HAState] {
+        var touched: [HAState] = []
+        for (id, state) in added {
+            cache[id] = state
+            touched.append(state)
+        }
+        for (id, diff) in changed {
+            guard let current = cache[id] else { continue }
+            var attributes = current.attributes.merging(diff.attributes) { _, new in new }
+            diff.removedAttributes.forEach { attributes[$0] = nil }
+            let next = HAState(entityID: id, state: diff.state ?? current.state, attributes: attributes)
+            cache[id] = next
+            touched.append(next)
+        }
+        for id in removed {
+            cache[id] = nil
+            touched.append(HAState(entityID: id, state: "unavailable"))
+        }
+        return touched
     }
 }
 
@@ -93,6 +131,7 @@ public final class HomeAssistantClient {
     public var onState: (HAState) -> Void = { _ in }
 
     private var loop: Task<Void, Never>?
+    private var cache: [String: HAState] = [:]
     private var socket: URLSessionWebSocketTask?
     private var nextID = 1
     private var awaitingPong = false
@@ -100,9 +139,10 @@ public final class HomeAssistantClient {
 
     public init() {}
 
-    public func start(baseURL: URL, token: String) {
+    /// Streams only `entityIDs`; Home Assistant filters server-side.
+    public func start(baseURL: URL, token: String, entityIDs: [String]) {
         stop()
-        loop = Task { [weak self] in await self?.run(baseURL: baseURL, token: token) }
+        loop = Task { [weak self] in await self?.run(baseURL: baseURL, token: token, entityIDs: entityIDs) }
     }
 
     public func stop() {
@@ -127,7 +167,7 @@ public final class HomeAssistantClient {
         return components.url
     }
 
-    private func run(baseURL: URL, token: String) async {
+    private func run(baseURL: URL, token: String, entityIDs: [String]) async {
         guard let url = Self.websocketURL(for: baseURL) else {
             onStatus(.disconnected(HAError.badURL.localizedDescription))
             return
@@ -136,7 +176,7 @@ public final class HomeAssistantClient {
         while !Task.isCancelled {
             onStatus(.connecting)
             do {
-                try await session(url: url, token: token)
+                try await session(url: url, token: token, entityIDs: entityIDs)
             } catch HAError.authInvalid(let message) {
                 onStatus(.authFailed(message))
                 return
@@ -153,10 +193,11 @@ public final class HomeAssistantClient {
         }
     }
 
-    private func session(url: URL, token: String) async throws {
+    private func session(url: URL, token: String, entityIDs: [String]) async throws {
         let ws = URLSession.shared.webSocketTask(with: url)
         socket = ws
         awaitingPong = false
+        cache = [:]
         ws.resume()
 
         var pinger: Task<Void, Error>?
@@ -179,18 +220,17 @@ public final class HomeAssistantClient {
             case .authOK:
                 didAuthenticate = true
                 onStatus(.connected)
-                // Subscribe before the snapshot so no change slips between the two.
-                try await send(["id": takeID(), "type": "subscribe_events", "event_type": "state_changed"], on: ws)
-                try await send(["id": takeID(), "type": "get_states"], on: ws)
+                // The first event carries each entity's full state; later ones only what changed.
+                if !entityIDs.isEmpty {
+                    try await send(["id": takeID(), "type": "subscribe_entities", "entity_ids": entityIDs], on: ws)
+                }
                 pinger = Task { try await keepAlive(ws) }
             case .authInvalid(let message):
                 throw HAError.authInvalid(message)
-            case .states(let states):
-                states.forEach(onState)
             case .result(let success, let error):
                 if !success { throw HAError.requestFailed(error ?? "Request failed") }
-            case .stateChanged(let state):
-                onState(state)
+            case .entities(let update):
+                update.apply(to: &cache).forEach(onState)
             case .pong:
                 awaitingPong = false
             case .other:

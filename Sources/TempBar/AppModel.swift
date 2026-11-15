@@ -134,7 +134,8 @@ final class AppModel {
             homeAssistant.stop()
             return
         }
-        homeAssistant.start(baseURL: url, token: token)
+        let entityIDs = [settings.temperatureEntity, settings.humidityEntity, settings.climateEntity, settings.airQualityEntity]
+        homeAssistant.start(baseURL: url, token: token, entityIDs: entityIDs.filter { !$0.isEmpty })
     }
 
     private func apply(_ state: HAState) {
