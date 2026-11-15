@@ -52,11 +52,16 @@ public enum OpenMeteo {
         let current: Current
     }
 
+    /// Two decimals is ~1 km: finer than the weather grid, coarse enough not to pinpoint you.
+    static func coarse(_ degrees: Double) -> String {
+        String(format: "%.2f", degrees)
+    }
+
     public static func forecastURL(latitude: Double, longitude: Double) -> URL {
         var components = URLComponents(string: "https://api.open-meteo.com/v1/forecast")!
         components.queryItems = [
-            URLQueryItem(name: "latitude", value: String(latitude)),
-            URLQueryItem(name: "longitude", value: String(longitude)),
+            URLQueryItem(name: "latitude", value: coarse(latitude)),
+            URLQueryItem(name: "longitude", value: coarse(longitude)),
             URLQueryItem(name: "current", value: "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,is_day"),
             URLQueryItem(name: "temperature_unit", value: "fahrenheit"),
             URLQueryItem(name: "wind_speed_unit", value: "mph"),
@@ -67,8 +72,8 @@ public enum OpenMeteo {
     public static func airQualityURL(latitude: Double, longitude: Double) -> URL {
         var components = URLComponents(string: "https://air-quality-api.open-meteo.com/v1/air-quality")!
         components.queryItems = [
-            URLQueryItem(name: "latitude", value: String(latitude)),
-            URLQueryItem(name: "longitude", value: String(longitude)),
+            URLQueryItem(name: "latitude", value: coarse(latitude)),
+            URLQueryItem(name: "longitude", value: coarse(longitude)),
             URLQueryItem(name: "current", value: "us_aqi,pm2_5"),
         ]
         return components.url!

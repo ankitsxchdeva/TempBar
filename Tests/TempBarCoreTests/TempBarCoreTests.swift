@@ -105,6 +105,16 @@ import Testing
         #expect(result.pm25 == 6.3)
     }
 
+    /// Weather grids are kilometers wide; sending more precision than ~1 km only leaks where you are.
+    @Test func coordinatesAreRoundedBeforeLeavingTheMac() {
+        for url in [OpenMeteo.forecastURL(latitude: 41.878113, longitude: -87.629799),
+                    OpenMeteo.airQualityURL(latitude: 41.878113, longitude: -87.629799)] {
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            #expect(items.first { $0.name == "latitude" }?.value == "41.88")
+            #expect(items.first { $0.name == "longitude" }?.value == "-87.63")
+        }
+    }
+
     @Test func missingAirQualityStillDecodes() throws {
         let forecast = #"""
         {"current":{"temperature_2m":30,"apparent_temperature":25,"relative_humidity_2m":80,
