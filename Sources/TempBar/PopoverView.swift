@@ -4,17 +4,33 @@ import TempBarCore
 struct PopoverView: View {
     let model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @State private var showingHistory = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            inside
-            Divider()
-            outside
+            // Both pages share one frame: the menu bar panel never shrinks after showing taller content.
+            ZStack(alignment: .topLeading) {
+                conditions
+                    .opacity(showingHistory ? 0 : 1)
+                    .allowsHitTesting(!showingHistory)
+                    .accessibilityHidden(showingHistory)
+                if showingHistory {
+                    HistoryView(model: model)
+                }
+            }
             Divider()
             footer
         }
         .padding(14)
         .frame(width: 300)
+    }
+
+    private var conditions: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            inside
+            Divider()
+            outside
+        }
     }
 
     // MARK: Inside
@@ -98,7 +114,11 @@ struct PopoverView: View {
 
     private var footer: some View {
         HStack {
-            Button("Refresh") { model.refreshAll() }
+            Button("Refresh") {
+                model.refreshAll()
+                if showingHistory { Task { await model.refreshIndoorHistory() } }
+            }
+            Button(showingHistory ? "Now" : "History") { showingHistory.toggle() }
             Button("Settings…") {
                 openWindow(id: SettingsView.windowID)
                 NSApplication.shared.activate()

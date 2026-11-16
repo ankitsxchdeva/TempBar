@@ -39,6 +39,7 @@ final class AppModel {
     private static let keychainService = "com.ankitsachdeva.tempbar"
     private static let keychainAccount = "home-assistant-token"
     private static let weatherInterval: Duration = .seconds(600)
+    static let historyWindow: TimeInterval = 12 * 3600
 
     private(set) var settings = Settings.load()
     private(set) var haStatus: HomeAssistantClient.Status = .idle
@@ -50,6 +51,9 @@ final class AppModel {
     private(set) var humidity: HAState?
     private(set) var climate: HAState?
     private(set) var airQuality: HAState?
+
+    private(set) var indoorHistory: [TemperatureSample] = []
+    private(set) var historyError: String?
 
     let location = LocationProvider()
     private let homeAssistant = HomeAssistantClient()
@@ -104,6 +108,21 @@ final class AppModel {
         Task { await refreshWeather() }
     }
 
+    /// Loads the last 12 hours of the indoor reading from Home Assistant's recorder.
+    func refreshIndoorHistory() async {
+        guard let source = indoorHistorySource else { return }
+        do {
+            let start = Date().addingTimeInterval(-Self.historyWindow)
+            let result = try await homeAssistant.request(HAHistory.request(entityID: source.entityID, start: start))
+            // Settings may have changed while the request was out.
+            guard indoorHistorySource?.entityID == source.entityID else { return }
+            indoorHistory = HAHistory.samples(from: result, entityID: source.entityID, attribute: source.attribute)
+            historyError = nil
+        } catch {
+            historyError = error.localizedDescription
+        }
+    }
+
     func update(settings newSettings: Settings, token: String?) {
         if let token, !token.isEmpty {
             try? Keychain.save(token, service: Self.keychainService, account: Self.keychainAccount)
@@ -122,7 +141,16 @@ final class AppModel {
 
     // MARK: Private
 
+    /// Mirrors `indoorF`: the temperature sensor, else the thermostat's own reading.
+    private var indoorHistorySource: (entityID: String, attribute: String?)? {
+        if !settings.temperatureEntity.isEmpty { return (settings.temperatureEntity, nil) }
+        if !settings.climateEntity.isEmpty { return (settings.climateEntity, "current_temperature") }
+        return nil
+    }
+
     private func connectHomeAssistant() {
+        indoorHistory = []
+        historyError = nil
         temperature = nil
         humidity = nil
         climate = nil
@@ -147,6 +175,12 @@ final class AppModel {
         default: return
         }
         indoorUpdatedAt = Date()
+        // Once history is loaded, live readings keep it current without refetching.
+        if let indoorF, let last = indoorHistory.last, last.fahrenheit != indoorF {
+            let now = Date()
+            indoorHistory.removeAll { $0.date < now.addingTimeInterval(-Self.historyWindow) }
+            indoorHistory.append(TemperatureSample(date: now, fahrenheit: indoorF))
+        }
     }
 
     private func refreshWeather() async {

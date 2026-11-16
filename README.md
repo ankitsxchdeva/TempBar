@@ -8,11 +8,15 @@ Click it to see the rest:
 
 - **Inside** — temperature, humidity, thermostat mode/target, and air quality, from [Home Assistant](https://www.home-assistant.io).
 - **Outside** — temperature, feels-like, conditions, humidity, wind, US AQI and PM2.5, from [Open-Meteo](https://open-meteo.com) at your current location.
+- **History** — a chart of both temperatures over the last 12 hours. Hover to read any point.
+
+![The last 12 hours, inside and outside](docs/history.png)
 
 ## How it stays current
 
 - **Inside:** a WebSocket to Home Assistant, so changes show up the moment HA reports them. Reconnects with backoff after sleep or network changes.
 - **Outside:** Open-Meteo's free forecast and air-quality APIs (no key). Refreshes every 10 minutes, after a ~1 km move, and on wake.
+- **History:** inside comes from Home Assistant's recorder (so the entity has to be recorded, which is the default), outside from Open-Meteo's hourly data. Nothing is stored on your Mac.
 
 Using Apple Home? Expose your devices to Home Assistant (e.g. via the HomeKit Controller or Matter integrations) and point TempBar at those entities. macOS has no public HomeKit API for menu bar apps.
 

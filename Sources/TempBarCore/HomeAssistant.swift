@@ -22,7 +22,7 @@ public enum HAIncoming: Sendable, Equatable {
     case authRequired
     case authOK
     case authInvalid(String)
-    case result(success: Bool, error: String?)
+    case result(id: Int?, success: Bool, error: String?, payload: JSONValue?)
     case entities(HAEntityUpdate)
     case pong
     case other
@@ -39,7 +39,12 @@ public enum HAIncoming: Sendable, Equatable {
         case "pong":
             return .pong
         case "result":
-            return .result(success: json["success"]?.bool ?? false, error: json["error"]?["message"]?.string)
+            return .result(
+                id: json["id"]?.double.map { Int($0) },
+                success: json["success"]?.bool ?? false,
+                error: json["error"]?["message"]?.string,
+                payload: json["result"]
+            )
         case "event":
             guard let event = json["event"] else { return .other }
             return .entities(HAEntityUpdate(json: event))
@@ -104,6 +109,7 @@ public enum HAError: LocalizedError, Equatable {
     case authInvalid(String)
     case requestFailed(String)
     case stale
+    case notConnected
 
     public var errorDescription: String? {
         switch self {
@@ -111,6 +117,7 @@ public enum HAError: LocalizedError, Equatable {
         case .authInvalid(let message): message
         case .requestFailed(let message): message
         case .stale: "Connection stopped responding"
+        case .notConnected: "Not connected to Home Assistant"
         }
     }
 }
@@ -136,6 +143,8 @@ public final class HomeAssistantClient {
     private var nextID = 1
     private var awaitingPong = false
     private var didAuthenticate = false
+    private var isReady = false
+    private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
 
     public init() {}
 
@@ -150,7 +159,30 @@ public final class HomeAssistantClient {
         loop = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        failPending()
         onStatus(.idle)
+    }
+
+    /// Sends a one-off command (without its `id`) on the live socket and returns its `result`.
+    public func request(_ message: [String: Any]) async throws -> JSONValue {
+        guard isReady, let ws = socket else { throw HAError.notConnected }
+        let id = takeID()
+        var message = message
+        message["id"] = id
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: message), as: UTF8.self)
+        return try await withCheckedThrowingContinuation { continuation in
+            pending[id] = continuation
+            ws.send(.string(text)) { [weak self] error in
+                guard let error else { return }
+                Task { @MainActor in self?.pending.removeValue(forKey: id)?.resume(throwing: error) }
+            }
+        }
+    }
+
+    private func failPending() {
+        isReady = false
+        pending.values.forEach { $0.resume(throwing: HAError.notConnected) }
+        pending = [:]
     }
 
     public nonisolated static func websocketURL(for base: URL) -> URL? {
@@ -204,6 +236,8 @@ public final class HomeAssistantClient {
         defer {
             pinger?.cancel()
             ws.cancel(with: .goingAway, reason: nil)
+            // A restart may already have replaced this session; its requests aren't ours to fail.
+            if socket === ws { failPending() }
         }
 
         while true {
@@ -219,6 +253,7 @@ public final class HomeAssistantClient {
                 try await send(["type": "auth", "access_token": token], on: ws)
             case .authOK:
                 didAuthenticate = true
+                isReady = true
                 onStatus(.connected)
                 // The first event carries each entity's full state; later ones only what changed.
                 if !entityIDs.isEmpty {
@@ -227,8 +262,13 @@ public final class HomeAssistantClient {
                 pinger = Task { try await keepAlive(ws) }
             case .authInvalid(let message):
                 throw HAError.authInvalid(message)
-            case .result(let success, let error):
-                if !success { throw HAError.requestFailed(error ?? "Request failed") }
+            case .result(let id, let success, let error, let payload):
+                let failure = HAError.requestFailed(error ?? "Request failed")
+                if let id, let continuation = pending.removeValue(forKey: id) {
+                    continuation.resume(with: success ? .success(payload ?? .null) : .failure(failure))
+                } else if !success {
+                    throw failure
+                }
             case .entities(let update):
                 update.apply(to: &cache).forEach(onState)
             case .pong:

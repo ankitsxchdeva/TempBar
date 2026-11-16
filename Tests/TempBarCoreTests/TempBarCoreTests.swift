@@ -24,8 +24,8 @@ import Testing
     }
 
     @Test func subscribeResult() throws {
-        #expect(try parse(#"{"id":1,"type":"result","success":true,"result":null}"#) == .result(success: true, error: nil))
-        #expect(try parse(#"{"id":1,"type":"result","success":false,"error":{"code":"x","message":"nope"}}"#) == .result(success: false, error: "nope"))
+        #expect(try parse(#"{"id":1,"type":"result","success":true,"result":null}"#) == .result(id: 1, success: true, error: nil, payload: .null))
+        #expect(try parse(#"{"id":1,"type":"result","success":false,"error":{"code":"x","message":"nope"}}"#) == .result(id: 1, success: false, error: "nope", payload: nil))
     }
 
     @Test func initialStatesArrive() throws {
@@ -80,6 +80,67 @@ import Testing
     }
 }
 
+@Suite struct HistoryTests {
+    private func result(_ json: String) throws -> JSONValue {
+        guard case .result(_, true, _, let payload?) = try HAIncoming.parse(Data(json.utf8)) else {
+            throw HAError.requestFailed("expected a successful result")
+        }
+        return payload
+    }
+
+    @Test func requestAsksForOneEntitySinceStart() {
+        let request = HAHistory.request(entityID: "sensor.t", start: Date(timeIntervalSince1970: 1_794_800_000))
+        #expect(request["type"] as? String == "history/history_during_period")
+        #expect(request["start_time"] as? String == "2026-11-16T03:33:20Z")
+        #expect(request["entity_ids"] as? [String] == ["sensor.t"])
+    }
+
+    /// Later rows may omit the unit; outages are skipped rather than drawn as a reading.
+    @Test func sensorHistoryConvertsToFahrenheit() throws {
+        let payload = try result(#"""
+        {"id":7,"type":"result","success":true,"result":{"sensor.t":[
+          {"s":"20","a":{"unit_of_measurement":"°C"},"lu":1794800000.5},
+          {"s":"unavailable","a":{},"lu":1794800600},
+          {"s":"21","a":{},"lu":1794801200,"lc":1794801100}]}}
+        """#)
+        #expect(HAHistory.samples(from: payload, entityID: "sensor.t") == [
+            TemperatureSample(date: Date(timeIntervalSince1970: 1_794_800_000.5), fahrenheit: 68),
+            TemperatureSample(date: Date(timeIntervalSince1970: 1_794_801_200), fahrenheit: 69.8),
+        ])
+        #expect(HAHistory.samples(from: payload, entityID: "sensor.other").isEmpty)
+    }
+
+    @Test func thermostatHistoryReadsTheAttribute() throws {
+        let payload = try result(#"""
+        {"id":7,"type":"result","success":true,"result":{"climate.c":[
+          {"s":"heat","a":{"current_temperature":70.5},"lu":1794800000},
+          {"s":"off","a":{"current_temperature":null},"lu":1794800600}]}}
+        """#)
+        #expect(HAHistory.samples(from: payload, entityID: "climate.c", attribute: "current_temperature") == [
+            TemperatureSample(date: Date(timeIntervalSince1970: 1_794_800_000), fahrenheit: 70.5),
+        ])
+    }
+
+    @Test func valueIsReadOffTheLine() {
+        let start = Date(timeIntervalSince1970: 0)
+        let samples = [TemperatureSample(date: start, fahrenheit: 60), TemperatureSample(date: start + 100, fahrenheit: 70)]
+        #expect(samples.value(at: start + 25) == 62.5)
+        #expect(samples.value(at: start - 50) == 60)
+        #expect(samples.value(at: start + 500) == 70)
+        #expect([TemperatureSample]().value(at: start) == nil)
+    }
+
+    @Test func clippingKeepsTheLineAtTheEdge() {
+        let start = Date(timeIntervalSince1970: 0)
+        let samples = [TemperatureSample(date: start, fahrenheit: 60), TemperatureSample(date: start + 100, fahrenheit: 70)]
+        #expect(samples.starting(at: start + 50) == [
+            TemperatureSample(date: start + 50, fahrenheit: 65), TemperatureSample(date: start + 100, fahrenheit: 70),
+        ])
+        #expect(samples.starting(at: start - 50) == samples)
+        #expect(samples.starting(at: start + 200) == [TemperatureSample(date: start + 200, fahrenheit: 70)])
+    }
+}
+
 @Suite struct FormatTests {
     @Test func menuTitle() {
         #expect(Format.menuTitle(indoorF: 70.6, outdoorF: 58.2) == "71°/58°")
@@ -129,6 +190,26 @@ import Testing
         #expect(result.isDay)
         #expect(result.usAQI == 42)
         #expect(result.pm25 == 6.3)
+    }
+
+    @Test func historyIsPastHoursThenTheCurrentReading() throws {
+        let forecast = #"""
+        {"current":{"time":1794839400,"temperature_2m":46.0,"apparent_temperature":41,"relative_humidity_2m":50,
+          "weather_code":0,"wind_speed_10m":5,"wind_direction_10m":0,"is_day":1},
+         "hourly":{"time":[1794834000,1794837600,1794841200],"temperature_2m":[40.2,null,47.0]}}
+        """#
+        let now = Date(timeIntervalSince1970: 1_794_840_269)
+        let result = try OpenMeteo.decode(forecast: Data(forecast.utf8), airQuality: nil, fetchedAt: now)
+        #expect(result.history == [
+            TemperatureSample(date: Date(timeIntervalSince1970: 1_794_834_000), fahrenheit: 40.2),
+            TemperatureSample(date: now, fahrenheit: 46.0),
+        ])
+    }
+
+    @Test func forecastRequestCoversTwelveHours() {
+        let items = URLComponents(url: OpenMeteo.forecastURL(latitude: 1, longitude: 2), resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(items.first { $0.name == "past_hours" }?.value == "12")
+        #expect(items.first { $0.name == "timeformat" }?.value == "unixtime")
     }
 
     /// Weather grids are kilometers wide; sending more precision than ~1 km only leaks where you are.

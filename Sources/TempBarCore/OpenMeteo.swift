@@ -10,6 +10,8 @@ public struct OutdoorConditions: Sendable, Equatable {
     public var windDirection: Double
     public var usAQI: Double?
     public var pm25: Double?
+    /// Hourly readings for the past 12 hours, ending with the current one.
+    public var history: [TemperatureSample]
     public var fetchedAt: Date
 }
 
@@ -36,7 +38,17 @@ public enum OpenMeteo {
                 case isDay = "is_day"
             }
         }
+        struct Hourly: Decodable {
+            let time: [Double]
+            let temperature2m: [Double?]
+
+            enum CodingKeys: String, CodingKey {
+                case time
+                case temperature2m = "temperature_2m"
+            }
+        }
         let current: Current
+        let hourly: Hourly?
     }
 
     struct AirQualityResponse: Decodable {
@@ -63,6 +75,10 @@ public enum OpenMeteo {
             URLQueryItem(name: "latitude", value: coarse(latitude)),
             URLQueryItem(name: "longitude", value: coarse(longitude)),
             URLQueryItem(name: "current", value: "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,is_day"),
+            URLQueryItem(name: "hourly", value: "temperature_2m"),
+            URLQueryItem(name: "past_hours", value: "12"),
+            URLQueryItem(name: "forecast_hours", value: "1"),
+            URLQueryItem(name: "timeformat", value: "unixtime"),
             URLQueryItem(name: "temperature_unit", value: "fahrenheit"),
             URLQueryItem(name: "wind_speed_unit", value: "mph"),
         ]
@@ -81,7 +97,16 @@ public enum OpenMeteo {
 
     public static func decode(forecast: Data, airQuality: Data?, fetchedAt: Date = Date()) throws -> OutdoorConditions {
         let decoder = JSONDecoder()
-        let current = try decoder.decode(ForecastResponse.self, from: forecast).current
+        let response = try decoder.decode(ForecastResponse.self, from: forecast)
+        let current = response.current
+        var history: [TemperatureSample] = []
+        if let hourly = response.hourly {
+            for (time, temperature) in zip(hourly.time, hourly.temperature2m) {
+                let date = Date(timeIntervalSince1970: time)
+                if let temperature, date < fetchedAt { history.append(TemperatureSample(date: date, fahrenheit: temperature)) }
+            }
+        }
+        history.append(TemperatureSample(date: fetchedAt, fahrenheit: current.temperature2m))
         // Air quality is a bonus; temperature still shows if that request fails.
         let air = airQuality.flatMap { try? decoder.decode(AirQualityResponse.self, from: $0).current }
         return OutdoorConditions(
@@ -94,6 +119,7 @@ public enum OpenMeteo {
             windDirection: current.windDirection10m,
             usAQI: air?.usAqi,
             pm25: air?.pm25,
+            history: history,
             fetchedAt: fetchedAt
         )
     }
