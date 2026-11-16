@@ -22,7 +22,18 @@ Using Apple Home? Expose your devices to Home Assistant (e.g. via the HomeKit Co
 - Xcode 16+ (Swift 6)
 - A Home Assistant instance reachable from your Mac
 
+## Install
+
+```sh
+brew install ankitsxchdeva/tap/tempbar
+tempbar   # launch it
+```
+
+Homebrew builds it from source on your Mac, so the requirements above apply. The app is signed ad hoc, so macOS asks again for Keychain access after each upgrade.
+
 ## Build
+
+To build from a checkout instead:
 
 ```sh
 ./scripts/build-app.sh            # -> build/TempBar.app
