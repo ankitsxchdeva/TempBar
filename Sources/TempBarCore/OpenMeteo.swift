@@ -12,6 +12,8 @@ public struct OutdoorConditions: Sendable, Equatable {
     public var pm25: Double?
     /// Hourly readings for the past 12 hours, ending with the current one.
     public var history: [TemperatureSample]
+    /// Predicted hourly temperatures for the next ~12 hours, starting with the current reading.
+    public var forecast: [TemperatureSample]
     public var fetchedAt: Date
 }
 
@@ -77,7 +79,7 @@ public enum OpenMeteo {
             URLQueryItem(name: "current", value: "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,wind_direction_10m,is_day"),
             URLQueryItem(name: "hourly", value: "temperature_2m"),
             URLQueryItem(name: "past_hours", value: "12"),
-            URLQueryItem(name: "forecast_hours", value: "1"),
+            URLQueryItem(name: "forecast_hours", value: "14"),
             URLQueryItem(name: "timeformat", value: "unixtime"),
             URLQueryItem(name: "temperature_unit", value: "fahrenheit"),
             URLQueryItem(name: "wind_speed_unit", value: "mph"),
@@ -99,14 +101,19 @@ public enum OpenMeteo {
         let decoder = JSONDecoder()
         let response = try decoder.decode(ForecastResponse.self, from: forecast)
         let current = response.current
+        let now = TemperatureSample(date: fetchedAt, fahrenheit: current.temperature2m)
         var history: [TemperatureSample] = []
+        var forecast: [TemperatureSample] = []
         if let hourly = response.hourly {
             for (time, temperature) in zip(hourly.time, hourly.temperature2m) {
-                let date = Date(timeIntervalSince1970: time)
-                if let temperature, date < fetchedAt { history.append(TemperatureSample(date: date, fahrenheit: temperature)) }
+                guard let temperature else { continue }
+                let sample = TemperatureSample(date: Date(timeIntervalSince1970: time), fahrenheit: temperature)
+                if sample.date < fetchedAt { history.append(sample) } else if sample.date > fetchedAt { forecast.append(sample) }
             }
         }
-        history.append(TemperatureSample(date: fetchedAt, fahrenheit: current.temperature2m))
+        // Both lines meet at the current reading, so the chart has no gap at "now".
+        history.append(now)
+        forecast.insert(now, at: 0)
         // Air quality is a bonus; temperature still shows if that request fails.
         let air = airQuality.flatMap { try? decoder.decode(AirQualityResponse.self, from: $0).current }
         return OutdoorConditions(
@@ -120,6 +127,7 @@ public enum OpenMeteo {
             usAQI: air?.usAqi,
             pm25: air?.pm25,
             history: history,
+            forecast: forecast,
             fetchedAt: fetchedAt
         )
     }

@@ -139,6 +139,15 @@ import Testing
         #expect(samples.starting(at: start - 50) == samples)
         #expect(samples.starting(at: start + 200) == [TemperatureSample(date: start + 200, fahrenheit: 70)])
     }
+
+    @Test func endingKeepsTheLineAtTheEdge() {
+        let start = Date(timeIntervalSince1970: 0)
+        let samples = [TemperatureSample(date: start, fahrenheit: 60), TemperatureSample(date: start + 100, fahrenheit: 70)]
+        #expect(samples.ending(at: start + 50) == [
+            TemperatureSample(date: start, fahrenheit: 60), TemperatureSample(date: start + 50, fahrenheit: 65),
+        ])
+        #expect(samples.ending(at: start + 200) == samples)
+    }
 }
 
 @Suite struct FormatTests {
@@ -206,9 +215,26 @@ import Testing
         ])
     }
 
+    @Test func forecastIsTheCurrentReadingThenFutureHours() throws {
+        let forecast = #"""
+        {"current":{"time":1794839400,"temperature_2m":46.0,"apparent_temperature":41,"relative_humidity_2m":50,
+          "weather_code":0,"wind_speed_10m":5,"wind_direction_10m":0,"is_day":1},
+         "hourly":{"time":[1794837600,1794841200,1794844800,1794848400],"temperature_2m":[44.0,47.0,null,49.5]}}
+        """#
+        let now = Date(timeIntervalSince1970: 1_794_840_269)
+        let result = try OpenMeteo.decode(forecast: Data(forecast.utf8), airQuality: nil, fetchedAt: now)
+        #expect(result.forecast == [
+            TemperatureSample(date: now, fahrenheit: 46.0),
+            TemperatureSample(date: Date(timeIntervalSince1970: 1_794_841_200), fahrenheit: 47.0),
+            TemperatureSample(date: Date(timeIntervalSince1970: 1_794_848_400), fahrenheit: 49.5),
+        ])
+    }
+
     @Test func forecastRequestCoversTwelveHours() {
         let items = URLComponents(url: OpenMeteo.forecastURL(latitude: 1, longitude: 2), resolvingAgainstBaseURL: false)?.queryItems ?? []
         #expect(items.first { $0.name == "past_hours" }?.value == "12")
+        // Hours count from the start of the current one, so 14 still reaches 12 hours past any minute of it.
+        #expect(items.first { $0.name == "forecast_hours" }?.value == "14")
         #expect(items.first { $0.name == "timeformat" }?.value == "unixtime")
     }
 

@@ -30,6 +30,14 @@ extension [TemperatureSample] {
         guard let edge = value(at: start) else { return kept }
         return [TemperatureSample(date: start, fahrenheit: edge)] + kept
     }
+
+    /// Drops samples after `end`, keeping the line's value there so it still reaches the edge.
+    public func ending(at end: Date) -> [TemperatureSample] {
+        guard let last, last.date > end else { return self }
+        let kept = filter { $0.date < end }
+        guard let edge = value(at: end) else { return kept }
+        return kept + [TemperatureSample(date: end, fahrenheit: edge)]
+    }
 }
 
 /// Recorded states from Home Assistant's recorder.

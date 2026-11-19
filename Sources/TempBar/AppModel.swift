@@ -40,6 +40,7 @@ final class AppModel {
     private static let keychainAccount = "home-assistant-token"
     private static let weatherInterval: Duration = .seconds(600)
     static let historyWindow: TimeInterval = 12 * 3600
+    static let forecastWindow: TimeInterval = 12 * 3600
 
     private(set) var settings = Settings.load()
     private(set) var haStatus: HomeAssistantClient.Status = .idle
